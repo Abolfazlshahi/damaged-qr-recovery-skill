@@ -2,568 +2,898 @@
 name: damaged-qr-recovery
 description: >
   Recover exact payloads from damaged, obscured, scratched, blurred, clipped,
-  compressed, or partially missing QR codes. Use QR geometry, version and
-  format metadata, function-module maps, masking, official zig-zag traversal,
-  RS block structure, Reed-Solomon erasure/error correction, constrained search,
-  exact re-encoding, module-level comparison, and independent decoding. Never
-  present a plausible payload as confirmed without mathematical and matrix-level
-  validation. Use for QR reconstruction, forensic validation, multi-image QR
-  recovery, and auditing claimed recoveries.
+  compressed, partially missing, or adversarially degraded QR codes. Use QR
+  geometry, finder/alignment/timing structure, version and format BCH metadata,
+  mask hypotheses, uncertainty-aware module extraction, official zig-zag
+  traversal, byte-level partial information, QR RS block interleaving,
+  Reed-Solomon erasure/error correction over GF(256), payload constraints,
+  parity fingerprints, candidate search, exact re-encoding, matrix-level proof,
+  independent decoding, multi-image evidence fusion, and ambiguity analysis.
+  Never present a plausible payload as confirmed without independent evidence.
 argument-hint: "[inspect|recover|validate|audit]"
 license: MIT
 ---
 
 # Damaged QR Recovery
 
-You are an evidence-first QR recovery specialist. Do not fabricate a recovery. Your goal is not to produce a URL that looks right. Your goal is to determine exactly what the QR encodes, or to prove that the available evidence is insufficient.
+You are an evidence-first QR reconstruction specialist. Your job is to recover the exact encoded bitstream/payload when the evidence permits it, not to produce the most plausible-looking string.
 
 ## Persistence
 
-Apply this Skill for the entire recovery task. Do not silently relax its validation rules because a decoder fails, because an external clue looks convincing, or because the user wants a fast answer.
+Keep this Skill active for the entire recovery task. Do not weaken validation because a normal decoder fails, because a vendor format looks obvious, or because the user wants a fast answer.
 
-Stop only when:
+A result may end as:
 
-- the payload is confirmed;
-- multiple candidates remain and the result is explicitly marked `AMBIGUOUS`; or
-- the evidence is insufficient and the result is explicitly marked `NOT_RECOVERED`/`PARTIAL`.
+- `CONFIRMED` — one candidate passes all required checks.
+- `AMBIGUOUS` — multiple candidates survive.
+- `PARTIAL` — some structure/bytes are recovered, but exact payload proof is incomplete.
+- `NOT_RECOVERED` — evidence is insufficient or contradictory.
+- `INVALID_INPUT` — QR geometry/structure cannot be established reliably.
 
 ## Core principle
 
-**Missing QR modules are evidence states, not invitations to guess.**
+> **Do not ask the AI to imagine the missing QR. Turn the damaged QR into a finite, testable constraint problem and let the QR's own redundancy decide what survives.**
 
-A module can be:
+---
 
-1. `KNOWN_BLACK` — confidently observed as dark.
-2. `KNOWN_WHITE` — confidently observed as light.
-3. `UNKNOWN` — damaged, covered, blurred, clipped, or otherwise not trustworthy.
+# 1. Operating Contract
 
-Do not collapse `UNKNOWN` into black/white merely to make a decoder accept the image.
-
-## Activation
-
-Use this Skill when the request involves:
-
-- repairing or reconstructing a damaged QR;
-- recovering a QR from a partial screenshot/photo;
-- extracting a QR payload when a normal decoder fails;
-- combining several images of the same QR;
-- validating a proposed QR reconstruction;
-- auditing another agent's QR recovery claim.
-
-Do not use it for ordinary QR generation unless the task also asks to reproduce/validate a damaged source.
-
-# 1. Operating contract
-
-## Required inputs
+## Inputs
 
 Accept any combination of:
 
-- one or more QR images;
-- a crop of the QR;
-- printed text beside/under the QR;
-- a known payload prefix or schema;
-- a trusted reference QR from the same generator;
-- vendor-specific formatting constraints supplied by the user.
+- original photos/screenshots/scans;
+- QR crops;
+- multiple views of the same QR;
+- visible document text;
+- printed serials or IDs;
+- known vendor URL templates;
+- an intact QR from the same generator;
+- a proposed candidate payload that must be audited.
 
-Treat every external input as a constraint candidate until its provenance is established.
+For every external clue, record provenance. A printed serial is observed document evidence; it is not automatically a recovered QR byte.
 
-## Required outputs
+## Outputs
 
-Every serious recovery should report:
+A serious recovery report should contain:
 
-- status;
-- payload, when known;
-- QR version;
-- ECC level;
-- mask pattern;
-- observed/unknown module counts;
-- codeword/block recovery summary;
-- visible-module mismatch count;
-- independent-decoder result;
-- uniqueness/ambiguity;
-- evidence provenance;
-- limitations or failed steps.
+```text
+status
+exact payload, if proven
+QR version
+ECC level
+mask pattern
+module geometry/confidence
+known/unknown module counts
+codeword/block recovery summary
+RS validation
+candidate constraints
+visible-module mismatch count
+independent decoder result
+uniqueness result
+provenance and limitations
+```
 
-## Status vocabulary
+---
 
-Use one of:
+# 2. Evidence Model
 
-- `CONFIRMED` — one candidate survives all required checks.
-- `AMBIGUOUS` — two or more candidates survive.
-- `PARTIAL` — useful structural or byte recovery exists, but payload proof is incomplete.
-- `NOT_RECOVERED` — available evidence is insufficient.
-- `INVALID_INPUT` — no reliable QR geometry or metadata can be established.
+Use these labels:
 
-# 2. Evidence hierarchy
-
-Tag information whenever practical:
-
-| Tag | Meaning | Trust role |
+| Label | Meaning | Can prove payload? |
 |---|---|---|
-| `OBSERVED` | directly supported by source pixels/modules | primary evidence |
-| `RECOVERED_BY_RS` | solved by QR parity constraints | mathematical evidence |
-| `CONSTRAINED_BY_METADATA` | narrowed by external trusted context | search constraint only |
-| `INFERRED_UNVERIFIED` | semantic/heuristic guess | never proof |
+| `OBSERVED` | Directly supported by trusted image/document evidence | Yes, when tied to QR modules |
+| `RECOVERED_BY_RS` | Determined by QR Reed-Solomon constraints | Yes, when full validation passes |
+| `CONSTRAINED_BY_METADATA` | Narrows a candidate using external trusted context | No, by itself |
+| `INFERRED_UNVERIFIED` | Semantic/heuristic guess | No |
 
-External clues may reduce the search space. They must never silently replace QR bytes.
+Keep image-derived confidence separate from logical certainty. A visually sharp module may still be geometrically misregistered; a mathematically recovered byte can be certain even though its pixels were fully occluded.
 
-# 3. Recovery ladder
+---
 
-Run stages in order and keep artifacts from each stage:
+# 3. Recovery Ladder
 
-```text
-1. Preserve originals
-2. Locate/rectify QR
-3. Determine version
-4. Recover format/version metadata
-5. Build tri-state module matrix
-6. Identify function modules
-7. Unmask data modules
-8. Traverse official data path
-9. Assemble raw codewords
-10. Apply QR RS block structure
-11. Solve erasures/errors
-12. Parse payload bits
-13. Apply explicit constraints
-14. Re-encode candidate
-15. Compare every known source module
-16. Independently decode reconstruction
-17. Search for competitors
-18. Classify final status
-```
-
-Do not skip a stage merely because a later tool produces a plausible result.
-
-# 4. Preserve the source
-
-Before processing:
-
-- keep the original file unchanged;
-- record dimensions, channels, and file type;
-- avoid repeated lossy saves;
-- note crops, rotations, resizes, filters, or screenshots;
-- if several images exist, keep them separately rather than flattening them immediately.
-
-If the same QR appears in several images, align them and fuse only evidence that is independently trustworthy.
-
-# 5. Locate and rectify
-
-Find the QR quadrilateral using finder-pattern geometry, a decoder's detected corners, or manual coordinates when necessary.
-
-Rectify perspective before module sampling. A warped QR can make an undamaged module look like a damaged one.
-
-Prefer a homography that maps the QR to a square module grid. Preserve enough margin to estimate the quiet zone when possible.
-
-Do not use image inpainting as evidence. Inpainting may be useful for visualization, never as the source of recovered data.
-
-# 6. Determine the QR version
-
-QR version `v` has module size:
+Run this ladder deliberately:
 
 ```text
-size = 17 + 4*v
+0. preserve source
+1. locate QR
+2. rectify / normalize geometry
+3. estimate version and module pitch
+4. recover format/version metadata
+5. classify function modules
+6. build tri-state/confidence matrix
+7. extract using official traversal
+8. test mask hypotheses
+9. assemble codewords
+10. map interleaving to RS blocks
+11. solve known erasures first
+12. parse mode/count/segments
+13. apply hard external constraints
+14. use parity fingerprints
+15. search only remaining degrees of freedom
+16. exact re-encode
+17. compare every known module
+18. independent decode
+19. search for competing candidates
+20. classify result
 ```
 
-for versions 1 through 40.
+Keep artifacts from every stage. A later failure should not destroy useful earlier evidence.
 
-Do not force a version solely because a library says it is likely. Confirm it from module geometry, finder/timing structure, and version information when applicable.
+---
 
-For version >= 7, use the two version-information areas when readable. Disagreement between copies is evidence of damage; resolve only when BCH-distance evidence is sufficient.
+# 4. Source Preservation and Image Forensics
 
-# 7. Recover format information
+Use the best available source before doing any mathematics.
 
-Format information encodes:
+## Preserve originals
 
-- error-correction level;
-- mask pattern.
+- never overwrite the original;
+- record dimensions, color model, file format and crop;
+- avoid repeated JPEG saves;
+- avoid screenshots of screenshots;
+- keep different images separately identifiable.
 
-There are two copies. Read both before committing.
+## Preprocessing ladder
 
-Use BCH validation/Hamming distance against legal format words. If both copies are damaged, keep multiple format candidates until the rest of the QR disambiguates them.
-
-Never confuse format information with payload data.
-
-# 8. Build the tri-state module matrix
-
-Represent each module as one of:
+Try inexpensive reversible operations first:
 
 ```text
-0 = known white
-1 = known black
-? = unknown
+original
+→ grayscale
+→ contrast normalization
+→ adaptive/global threshold variants
+→ mild denoise
+→ perspective rectification
+→ module sampling
 ```
 
-Store confidence separately from the binary state when image quality is marginal.
+Do not use hallucinated/inpainted pixels as factual evidence. An inpainted image may help a human see the geometry, but the reconstruction must come from observed modules plus code constraints.
 
-Suggested evidence record:
+## Important trick: never trust one threshold
+
+For ambiguous modules, sample multiple preprocessing variants. If all reasonable thresholds produce the same module state, confidence rises. If they disagree, store `UNKNOWN`/`UNCERTAIN` rather than choosing whichever output helps a decoder.
+
+---
+
+# 5. Locate and Rectify the QR
+
+Use finder-pattern geometry, decoder-provided corners, or manual points when needed.
+
+## Finder-pattern clues
+
+The three large square finder patterns establish orientation and the approximate outer quadrilateral. Their geometry is more reliable than guessing the QR's bounding box from dark-pixel density.
+
+## Perspective correction
+
+Map the QR quadrilateral into a square coordinate system with a homography. Sample near module centers, not boundaries.
+
+When corners are uncertain, test a small family of plausible homographies and score them against stable finder/timing structure. A slightly wrong homography can create thousands of false “damaged” modules.
+
+## Quiet-zone trick
+
+The white quiet zone is outside the encoded matrix and must not be mistaken for version-1 modules or padding inside the matrix. Use it as a geometric sanity check when visible.
+
+---
+
+# 6. Version Discovery
+
+For QR version `v`:
 
 ```text
-(row, col, state, confidence, source_image_id, note)
+modules = 17 + 4*v
 ```
 
-When several photos show the same QR:
+for versions 1–40.
 
-- register them to a common grid;
-- prefer consistent samples;
-- preserve disagreements as uncertain until resolution is justified.
+Do not trust image dimensions alone. Version is constrained by:
 
-# 9. Mark function modules
+- finder spacing;
+- timing pattern pitch;
+- total module count;
+- alignment-pattern locations;
+- version information for versions 7+;
+- capacity/payload-length consistency.
 
-Function modules are not payload. Exclude them from codeword extraction.
+## Length-consistency trick
+
+Sometimes the payload bytes themselves reveal the version hypothesis. If the first codeword is readable enough to identify mode and character count, use that count to test whether a candidate version/ECC combination can physically contain the segment with legal terminator/padding. Reject impossible versions before brute-force recovery.
+
+---
+
+# 7. Format and Version Information
+
+## Format information
+
+Format information contains the ECC level and mask pattern. There are two copies.
+
+Read both whenever possible and use BCH/Hamming-distance reasoning. If one copy is damaged, the second copy may resolve it. If both are uncertain, keep a hypothesis set instead of forcing one.
+
+## Version information
+
+For versions 7+, version information has redundancy and should be read before payload assumptions. Cross-check both copies.
+
+## BCH-distance trick
+
+When a metadata region contains a few uncertain modules, do not brute-force the whole QR. Enumerate only legal BCH codewords nearby and retain candidates with the best error distance. This turns several unknown modules into a tiny finite hypothesis set.
+
+---
+
+# 8. Function-Module Map
+
+Never treat function modules as payload.
 
 Account for:
 
-- three finder patterns;
+- finder patterns;
 - separators;
 - timing patterns;
 - alignment patterns;
-- format-information areas;
-- version-information areas for applicable versions;
+- format information;
+- version information;
 - dark module;
-- reserved regions associated with format/version placement.
+- reserved format/version areas.
 
-A classic recovery bug is treating a function module as a data bit, shifting every later byte.
+A one-cell mistake here shifts the entire data extraction stream.
 
-# 10. Remove the QR mask
+## Geometry-first sanity check
 
-Only data and error-correction modules are unmasked.
+Before extracting bytes, count/visualize which coordinates are classified as function modules. The data-module count should match the expected total codeword capacity for the version/ECC hypothesis.
 
-Given mask pattern `m`, compute the mask predicate for `(row, col)` using the QR specification's eight mask formulas. XOR the stored data bit with the mask bit.
+---
 
-Never unmask finder, timing, format, version, or alignment modules as if they were data.
+# 9. Tri-State / Confidence Matrix
 
-When the mask is uncertain, test all eight candidates against downstream structural consistency rather than guessing.
-
-# 11. Traverse data modules exactly
-
-Walk the data modules using the QR's two-column vertical zig-zag traversal, moving from the lower-right area toward the left, skipping the vertical timing column.
-
-Reverse scan direction on each column pair.
-
-Convert the resulting bit stream into bytes in groups of eight. Track the final partial byte and terminator/padding area explicitly.
-
-A one-cell traversal error can corrupt the entire payload, so validate the traversal against known codeword positions whenever possible.
-
-# 12. QR block structure
-
-QR data is split into Reed-Solomon blocks. The number of blocks and data/ECC codewords per block depend on version and ECC level.
-
-You must use an authoritative version/ECC block table for the exact QR version. Do not extrapolate block counts from another version.
-
-The bitstream is interleaved across blocks. Therefore a damaged contiguous image region does not necessarily correspond to a contiguous byte region after deinterleaving.
-
-Keep these representations separate:
+Minimum representation:
 
 ```text
-module matrix
-→ serialized bitstream
-→ interleaved codewords
-→ per-block codewords
-→ data + ECC codewords
+0 = confidently white
+1 = confidently black
+? = unknown / occluded
+~ = uncertain / low-confidence
 ```
 
-# 13. Reed-Solomon recovery
+Prefer a richer internal model:
 
-QR Reed-Solomon operates over GF(256) with primitive polynomial:
+```text
+state
+confidence
+source image(s)
+coordinate
+reason
+preprocessing variants
+```
+
+## Occlusion trick
+
+If a marker/paint/white box covers a known rectangular area, do not reconstruct its internal pixels visually. Mark the corresponding modules erased even if the overlay color contains compression artifacts.
+
+## Module-center sampling trick
+
+If a module occupies several pixels, sample a central patch or robust statistic instead of one pixel. Boundary pixels are where anti-aliasing and perspective errors are worst.
+
+---
+
+# 10. Multi-Image Fusion
+
+With several photos of the same QR:
+
+```text
+image A ─┐
+image B ─┼→ register → module evidence → fused matrix
+image C ─┘
+```
+
+Register geometrically before merging. Never majority-vote pixels from misaligned images.
+
+For each module:
+
+- consistent observations increase confidence;
+- one sharp observation can resolve an occlusion in another image;
+- genuine disagreement should remain uncertain until geometry is checked.
+
+## Occlusion-complement trick
+
+The most valuable second image is not necessarily the sharpest one. A blurry photo that exposes a different physical region can reveal the exact modules hidden in the sharp photo.
+
+---
+
+# 11. Mask Hypotheses
+
+QR masking applies only to data/ECC modules. Remove it using the detected mask formula.
+
+The eight legal mask patterns are finite and cheap to test.
+
+## Mask search trick
+
+When format information is damaged, evaluate all eight masks and rank them by downstream invariants:
+
+```text
+format candidate
+→ unmask
+→ codeword structure
+→ mode/count legality
+→ RS consistency
+→ visible-module compatibility
+```
+
+A wrong mask usually destroys many layers of consistency, so it can often be eliminated without fully recovering the payload.
+
+---
+
+# 12. Official Data Traversal
+
+Do not read the image row-by-row.
+
+Traverse the QR's data modules using the standard two-column vertical zig-zag pattern from the right side toward the left, skipping the timing column and all function modules. Alternate vertical direction for each column pair.
+
+## Traversal sanity checks
+
+- total extracted bits must equal the QR's available data+ECC bit capacity;
+- the traversal must skip every function coordinate exactly once;
+- changing a single traversal coordinate can shift all later bytes, so compare early known bytes against external evidence only as a diagnostic, not as proof.
+
+---
+
+# 13. Codeword Reconstruction
+
+Convert the unmasked bitstream into 8-bit codewords while retaining unknown bits.
+
+For a partial byte:
+
+```text
+010?1???
+```
+
+store the fixed-bit mask and enumerate only compatible byte values when needed.
+
+## High-value trick: preserve bit holes
+
+Do not immediately enumerate all `2^k` possibilities for a partially known byte when `k` is large. Carry symbolic fixed/unknown bits into later constraints, or enumerate only after mode/length and RS structure have reduced the space.
+
+## Payload mode clues
+
+Common mode indicators:
+
+```text
+0001 numeric
+0010 alphanumeric
+0100 byte
+1000 kanji
+```
+
+Other QR segments may contain ECI, structured append, FNC1, or multiple segments. Do not assume a QR contains exactly one byte segment.
+
+---
+
+# 14. Interleaving and RS Block Layout
+
+QR codewords are interleaved across Reed-Solomon blocks. The exact number of blocks and number of data/ECC codewords per block depend on version and ECC level.
+
+Always use the exact version/ECC block table.
+
+Keep these layers separate:
+
+```text
+modules
+→ raw bitstream
+→ interleaved codewords
+→ RS blocks
+→ data/ECC portions
+→ payload segments
+```
+
+## Interleaving trick
+
+A visually contiguous damaged region can correspond to scattered bytes across multiple RS blocks after deinterleaving. Therefore measure damage in **codeword space**, not only in pixel/module space.
+
+---
+
+# 15. Reed-Solomon Recovery
+
+QR uses Reed-Solomon over GF(256). The standard QR field uses the primitive polynomial:
 
 ```text
 x^8 + x^4 + x^3 + x^2 + 1
 ```
 
-Treat missing bytes as erasures whenever their positions are known.
+## Erasures before errors
 
-## Erasure-first strategy
+If a symbol's position is known to be damaged, model it as an erasure. Do not invent a value and call it an error.
 
-1. Collect the exact byte indices that are unknown.
-2. Leave known byte values untouched.
-3. Build parity equations for the block.
-4. Solve only the missing symbols when the system is sufficiently constrained.
-5. Verify the complete block against the expected RS parity.
-6. Record recovered bytes as `RECOVERED_BY_RS`.
-
-Do not replace an unknown byte with a semantic guess before attempting the algebraic recovery.
-
-## Errors vs erasures
-
-An unknown location is generally more valuable than an unknown location plus a false value. A correct erasure model lets the decoder spend its correction budget on the known positions that are wrong rather than pretending an uncertainty is certain.
-
-If a byte is suspected wrong rather than missing, keep it as an error candidate and use a bounded error-correction/search stage after pure erasure solving.
-
-# 14. Payload parsing
-
-Parse the recovered bitstream using the actual mode indicator and character-count rules.
-
-Common modes include:
-
-- numeric;
-- alphanumeric;
-- byte;
-- kanji;
-- structured append / ECI where applicable.
-
-For byte mode, preserve raw bytes and only decode text after establishing the correct encoding/ECI semantics.
-
-Do not normalize characters, slashes, casing, Unicode, or URLs during the cryptographic/QR recovery stage.
-
-# 15. External constraints
-
-Use external evidence only after extracting as much as possible from the QR itself.
-
-Legitimate constraints can include:
-
-- printed ticket/receipt identifier;
-- known vendor prefix;
-- fixed field lengths;
-- trusted schema;
-- known token alphabet;
-- known check digit;
-- another intact QR produced by the same system.
-
-A constraint narrows candidates. It does not grant permission to overwrite QR data.
-
-Example:
+For a block with `t` parity symbols, a useful classical bound is:
 
 ```text
-Observed: 20-byte prefix + unknown token + printed 9-digit serial + suffix
-Constraint: serial must equal printed serial
-Result: candidate space shrinks
+2e + s <= t
 ```
 
-Do not write “serial recovered from QR” when the serial merely came from the printed document.
+where:
 
-# 16. Constrained search
+- `e` = unknown-location symbol errors;
+- `s` = known-location erasures.
 
-If algebraic recovery leaves a small number of unknown bytes:
+The exact decoder/algorithm still has to validate the recovered block.
 
-1. derive all hard constraints;
-2. calculate the remaining degrees of freedom;
-3. search only the constrained variables;
-4. regenerate the complete QR for every survivor;
-5. compare every known source module;
-6. keep all survivors until uniqueness is proven.
+## RS recovery ladder
 
-Good constraints are structural and exact. Examples:
+1. all symbols known → verify parity;
+2. known erasures only → solve erasures;
+3. erasures + suspected errors → error/erasure decoding;
+4. unresolved bytes → constrained candidate search;
+5. final candidate → regenerate parity and full QR.
 
-- exact fixed prefix;
-- exact suffix;
-- exact length;
+## Parity-equation trick
+
+For a small number of missing symbols, you do not always need a full Berlekamp–Massey/Forney implementation to reason about the case. The parity symbols provide linear constraints over GF(256). Build equations for the unknown symbols, solve them, then run a complete syndrome/parity verification.
+
+## Partial-parity trick
+
+Even when several data bytes are unknown, any visible ECC symbols are evidence. You can compute candidate parity from proposed data and reject candidates immediately when the observed parity symbols disagree.
+
+---
+
+# 16. The Most Important Practical Trick: Count Bits Correctly
+
+Never infer payload length from how many human-readable characters you expected.
+
+In byte mode, the beginning of the segment is structurally:
+
+```text
+mode indicator
+character-count indicator
+payload bytes
+```
+
+A damaged bit in the character-count field can make an apparently impossible message length become valid. Conversely, a one-byte count mistake can shift every subsequent interpretation.
+
+## Count-field hypothesis trick
+
+When the first codeword/bytes look strange, inspect them as raw bits rather than decoded text. For example, a leading byte that begins with the expected byte-mode marker may itself contain the most useful clue about the count field. Keep multiple count hypotheses until the remaining bit budget and RS checks resolve them.
+
+Never hard-code a presumed payload byte count merely because a visible URL “should” have that length.
+
+---
+
+# 17. Semantic Constraints — Powerful, But Never Proof
+
+External metadata can make an impossible search tractable.
+
+Useful hard constraints:
+
+- fixed vendor prefix/suffix;
+- known payload length;
+- printed ticket/receipt serial;
 - character alphabet;
-- printed identifier equality;
-- known ECI/mode;
-- RS parity.
+- known token length;
+- known ECI/encoding;
+- fixed URL path structure;
+- another intact QR from the same generator.
 
-Do not rely on “this looks like a normal URL”.
+## Constraint ordering
 
-# 17. Parity fingerprints
-
-Reed-Solomon parity can act as a fingerprint for candidate values.
-
-For a candidate set:
+Apply constraints in this order:
 
 ```text
-candidate bytes
-    ↓
-RS parity recomputation
-    ↓
-compare against observed ECC symbols
+geometry
+→ QR syntax
+→ bit-pattern constraints
+→ mode/count
+→ fixed bytes
+→ payload schema
+→ metadata equality
+→ RS parity
+→ complete matrix proof
 ```
 
-A candidate matching many independently observed parity symbols is stronger evidence than semantic plausibility.
+Do not let semantic constraints override structural contradictions.
 
-For multiple RS blocks, score them separately. A candidate that only matches one block but fails another is rejected.
+## Reference-QR trick
 
-# 18. Exact re-encoding
+An intact QR from the same system can reveal:
 
-A confirmed payload must be encoded back into a fresh QR with the same relevant structure:
+- URL prefix/suffix;
+- encoding style;
+- segmentation choices;
+- whether `optimize`-style encoder behavior matters;
+- token alphabet;
+- field lengths;
+- vendor-specific quirks.
+
+Use the reference QR to constrain the search, not to copy unknown bytes.
+
+---
+
+# 18. Search Space Reduction
+
+When unknown bytes remain, calculate the degrees of freedom before brute force.
+
+Suppose `k` bits are unknown. Naively there are `2^k` assignments. Reduce that space using:
+
+1. fixed payload prefix/suffix;
+2. byte-mode count rules;
+3. character alphabet;
+4. printed IDs;
+5. segment boundaries;
+6. RS parity;
+7. visible matrix modules;
+8. exact re-encoding.
+
+## Branch-and-bound trick
+
+Search from the earliest constrained byte outward. As soon as a partial candidate produces a parity contradiction or an already-known module mismatch, prune that branch.
+
+Do not generate complete payloads when early constraints can eliminate them.
+
+## Candidate ranking trick
+
+Maintain a diagnostic score, but do not use the score as truth:
+
+```text
++ structural consistency
++ fixed-bit agreement
++ observed RS parity agreement
++ payload-schema agreement
++ independent decode
+- visible module mismatches
+- format/version contradictions
+```
+
+Only hard proof checks may elevate a candidate to `CONFIRMED`.
+
+---
+
+# 19. Parity Fingerprints
+
+For each candidate:
+
+```text
+candidate payload
+→ exact data codewords
+→ exact RS parity
+→ compare against observed ECC symbols
+```
+
+This is one of the strongest tricks in sparse recovery because semantic guesses that happen to look correct usually do not reproduce the parity bytes.
+
+## Block-local fingerprinting
+
+Evaluate each RS block separately. A candidate that passes one block but fails another is invalid. Visible parity symbols from different blocks provide independent filters.
+
+## Delta trick
+
+When comparing two candidates that differ in only a few data symbols, compare their induced parity deltas instead of rebuilding everything conceptually from scratch. Over GF(256), parity is linear, so a candidate change has a predictable parity effect.
+
+This is especially useful when exploring a small token/serial search space.
+
+---
+
+# 20. Exact QR Re-Encoding
+
+Generate a QR using the recovered:
 
 - version;
 - ECC level;
-- payload representation;
-- byte encoding / ECI where applicable;
-- mask when reconstructing an exact matrix.
+- exact byte/string representation;
+- ECI/segment structure where relevant;
+- mask pattern;
+- appropriate QR construction parameters.
 
-Do not assume two visually equivalent QR images are structurally identical. The matrix itself is the object being validated.
+## Encoder trap: segmentation
 
-# 19. Matrix-level validation
+Two encoders can encode the same human-readable text into different valid QR matrices because they choose different segmentation/modes.
 
-This is the most important final check.
+Therefore:
 
-For every module whose source state is known:
+- matching decoded text is weaker than matching the matrix;
+- automatic optimization can change the matrix;
+- for exact reconstruction, reproduce the original segment structure as closely as evidence permits;
+- when the original matrix cannot be uniquely determined, do not call a text-equivalent matrix an exact clone.
+
+## Re-encoding trick
+
+Disable or control automatic optimization when the goal is matrix reproduction. A decoder accepting the regenerated QR only proves that the candidate payload is valid, not that it is the source payload.
+
+---
+
+# 21. Matrix-Level Proof
+
+For every trusted source module:
 
 ```text
-observed_module == regenerated_module
+observed == reconstructed
 ```
 
 Count mismatches.
 
-For a confirmed candidate, the expected count is zero across all trusted known modules.
-
-Unknown/occluded source modules are not counted as contradictions because they intentionally carry no direct bit evidence.
-
-Also compare the recovered format/version/function modules where they were observed.
-
-# 20. Independent decoder
-
-After matrix validation, render the reconstruction and run an independent QR decoder.
-
-Possible independent decoders include different libraries or a second implementation. A useful combination is:
-
-- algorithmic matrix comparison;
-- a decoder independent of the recovery logic.
-
-The independent decoder is not the proof by itself. It is a separate sanity check.
-
-# 21. Uniqueness
-
-Never equate “one candidate found quickly” with “unique”.
-
-Search for competitors when unknown information remains. A recovery is unique only when:
-
-- all mandatory constraints have been applied;
-- no second payload survives;
-- regenerated matrix evidence agrees;
-- independent decoding agrees.
-
-If two payloads survive, report `AMBIGUOUS` and list the distinguishing unknowns rather than picking the nicer-looking one.
-
-# 22. Multi-image fusion
-
-When several images of the same QR exist:
+For an exact candidate under a correct geometry/matrix model:
 
 ```text
-image A ─┐
-image B ─┼→ register → per-module evidence → fused matrix
-image C ─┘
+mismatch_count = 0
 ```
 
-For each module:
+Unknown/occluded modules are not contradictions because they were intentionally erased from the evidence set.
 
-- consistent values increase confidence;
-- one clear value plus several occlusions can establish a fact;
-- conflicting clear values require geometry/alignment review;
-- do not majority-vote across misregistered images.
+## Coordinate proof trick
 
-A second photo can turn an erasure into an observation; it should not simply make a guess “more likely”.
+Store mismatch coordinates, not just a total count. A few clustered mismatches may indicate a wrong homography or threshold boundary; widespread mismatches usually indicate a wrong payload/mask/segmentation hypothesis.
 
-# 23. Failure recovery
+## Visible-module subset trick
 
-If a stage fails, escalate in this order:
+When damage is severe, compare against the **confidently visible subset** rather than trying to classify blurred/covered pixels. Zero mismatches over a trustworthy subset can be decisive even when large areas are missing.
+
+---
+
+# 22. Independent Decode
+
+After matrix proof, render the reconstructed matrix and decode it with an implementation independent of the recovery logic.
+
+Good practice:
 
 ```text
-decode directly
-→ crop better
-→ rectify better
-→ improve module sampling
-→ recover format/version
-→ tri-state matrix
-→ algebraic erasure recovery
-→ constrained search
-→ multi-image fusion
-→ exact re-encoding
-→ independent validation
+recovered matrix
+→ decoder A
+→ decoder B (when practical)
 ```
 
-When one image is too damaged, ask for another photo of the same QR or a higher-resolution crop. Do not compensate for missing evidence by inventing data.
+Independent decoding is a sanity check, not the mathematical proof. A wrong candidate may still be a perfectly valid QR.
 
-# 24. Common failure modes
+---
 
-## “The decoder says nothing.”
+# 23. Uniqueness Analysis
 
-That only means the generic decoder did not recover the payload. It does not establish that the QR is unrecoverable.
+Finding one survivor is not the same as proving uniqueness.
 
-## “The URL format is obvious.”
+## Required behavior
 
-Format plausibility is a constraint, not proof.
+- preserve all surviving candidates;
+- continue searching when the residual search space is tractable;
+- record why each rejected candidate failed;
+- stop claiming uniqueness only when alternatives are eliminated by the same constraints.
 
-## “I can see most of the QR.”
+If two exact candidates remain and both match all known modules, the correct result is `AMBIGUOUS`.
 
-Pixel count is not enough. What matters is which **data/ECC codewords** remain known after traversal and block deinterleaving.
+## Uniqueness trick: perturb known assumptions
 
-## “ECC is high, so anything can be restored.”
+Deliberately relax one external assumption at a time:
 
-ECC has a finite symbol correction budget and is applied per RS block.
+```text
+known serial constraint ON/OFF
+known token alphabet ON/OFF
+known prefix ON/OFF
+```
 
-## “I guessed the missing characters and the QR works.”
+If uniqueness disappears immediately when one assumption is removed, state that dependency explicitly. This distinguishes QR-derived proof from metadata-driven uniqueness.
 
-Regenerate and compare all known source modules. If mismatches exist, reject the candidate.
+---
 
-## “The two images look similar.”
+# 24. Case-Study Pattern: Recovering a URL with an Unknown Token
 
-Register them at module level before fusing evidence.
+A common real-world shape is:
 
-# 25. Audit checklist
+```text
+fixed_prefix + unknown_token + known_serial + fixed_suffix
+```
 
-Before calling a recovery confirmed, answer “yes” to all relevant questions:
+Do not assume the token length from visual intuition.
 
-- Is the QR geometry established?
-- Is the version established?
-- Is ECC established?
-- Is mask established?
-- Are function modules excluded?
-- Are uncertain modules preserved as unknown?
-- Is official traversal used?
-- Is the correct RS block table used?
-- Are erasures handled before guesses?
-- Are external clues labeled as constraints?
-- Is the payload parsed without normalization that could alter bytes?
-- Was the candidate re-encoded?
-- Are all known source modules matched?
-- Did an independent decoder succeed?
-- Was uniqueness checked?
+Derive it from the QR bitstream:
 
-Any “no” should either block confirmation or be explicitly documented as a limitation.
+1. recover byte mode;
+2. recover the character count;
+3. calculate exact payload length;
+4. subtract lengths of observed fixed fields;
+5. solve only the residual token bytes;
+6. use visible codeword/ECC constraints to prune candidates;
+7. regenerate the whole QR;
+8. compare every known module.
 
-# 26. Agent output format
+## Why this works
 
-Use this compact structure:
+The payload schema and the QR's own parity become complementary constraints. A large apparent character search can collapse to a handful of legal strings before any expensive brute force.
+
+## Critical warning
+
+Never publish a real ticket/session/credential token merely as an example in public benchmark fixtures. Redact or synthesize those values.
+
+---
+
+# 25. Failure Recovery
+
+## Decoder fails
+
+Interpret this as “generic decoding failed”, not “recovery impossible”.
+
+## Geometry seems unstable
+
+Return to finder patterns, perspective, quiet zone, and module pitch.
+
+## Format is uncertain
+
+Test both copies, BCH/Hamming-distance candidates, and all plausible mask values.
+
+## Bytes look shifted
+
+Check, in order:
+
+```text
+function-map coordinates
+→ timing-column skip
+→ traversal direction
+→ mask removal
+→ codeword bit order
+→ block interleaving
+```
+
+## RS fails
+
+Check version/ECC block table and deinterleaving before blaming the solver.
+
+## Candidate looks perfect but parity fails
+
+Reject it. Semantic similarity does not override Reed-Solomon evidence.
+
+## Exact matrix comparison fails
+
+Investigate:
+
+- wrong payload bytes;
+- wrong mask;
+- wrong segment structure;
+- wrong version/ECC;
+- wrong geometry registration;
+- encoder mismatch.
+
+## Only a few visible mismatches remain
+
+Do not immediately blame the payload. Cluster the mismatch coordinates. Boundary-aligned clusters often indicate sampling/registration errors; diffuse mismatches are more consistent with a wrong matrix hypothesis.
+
+---
+
+# 26. Escalation Modes
+
+### Mode A — Inspect
+No guessing. Report geometry, metadata, visible regions, uncertainty, and likely recovery path.
+
+### Mode B — Recover
+Run the complete ladder and produce candidates/proof.
+
+### Mode C — Validate
+Given a candidate, attempt to falsify it. Rebuild parity and matrix; do not merely decode the candidate QR.
+
+### Mode D — Audit
+Assume a claimed recovery may be wrong. Search specifically for counterexamples, alternate payloads, encoder mismatch, and unsupported inference.
+
+---
+
+# 27. Audit Checklist
+
+Before `CONFIRMED`, answer yes to every applicable item:
+
+- [ ] geometry established;
+- [ ] version established;
+- [ ] ECC established;
+- [ ] mask established;
+- [ ] function modules excluded;
+- [ ] uncertainty preserved;
+- [ ] official traversal used;
+- [ ] exact RS block layout used;
+- [ ] data/ECC interleaving reversed correctly;
+- [ ] erasures attempted before guesses;
+- [ ] payload mode/count parsed from bits;
+- [ ] external evidence labeled as constraints;
+- [ ] candidate re-encoded;
+- [ ] every trusted visible module agrees;
+- [ ] independent decoder succeeds;
+- [ ] uniqueness checked or explicitly unavailable.
+
+A failed item does not have to stop all progress, but it must be disclosed and the final status downgraded when necessary.
+
+---
+
+# 28. Agent Tool Strategy
+
+Use the cheapest reliable operation first.
+
+```text
+image inspection
+→ geometry measurement
+→ small finite hypothesis tests
+→ algebraic constraints
+→ bounded search
+→ exact regeneration
+→ independent verification
+```
+
+Do not launch an enormous brute-force search before calculating what the QR structure can already tell you.
+
+When writing code, isolate these primitives:
+
+```text
+locate_qr
+rectify_qr
+estimate_module_grid
+sample_modules
+merge_evidence
+read_format_info
+read_version_info
+build_function_map
+mask_predicate
+extract_data_coordinates
+extract_codewords
+get_rs_block_layout
+deinterleave_blocks
+gf256_mul
+gf256_inv
+rs_encode
+rs_syndromes
+rs_recover_erasures
+rs_decode_errors_erasures
+parse_segments
+build_constraints
+candidate_search
+encode_exact_qr
+compare_known_modules
+independent_decode
+uniqueness_check
+```
+
+---
+
+# 29. Reporting Format
+
+Use:
 
 ```text
 STATUS: CONFIRMED | AMBIGUOUS | PARTIAL | NOT_RECOVERED | INVALID_INPUT
 
 Payload: <exact payload or unavailable>
 QR: version=<n>, ECC=<L/M/Q/H>, mask=<0..7>
-Evidence: observed=<n>, unknown=<n>
-Visible mismatches: <n or unavailable>
+Geometry: <grid/perspective confidence>
+Evidence: observed=<n>, unknown=<n>, uncertain=<n>
+Codewords: <known/unknown>
+RS: <summary>
+Visible mismatches: <n>
 Independent decode: PASS | FAIL | NOT_RUN
 Unique candidate: YES | NO | UNKNOWN
 
-Evidence provenance:
+Provenance:
 - OBSERVED: ...
 - RECOVERED_BY_RS: ...
 - CONSTRAINED_BY_METADATA: ...
 - INFERRED_UNVERIFIED: ...
 
-Limitations: ...
+Rejected alternatives:
+- <candidate>: <reason>
+
+Limitations:
+- ...
 ```
 
-Never hide uncertainty in prose such as “almost certainly”. Use a status instead.
+Never hide an assumption that materially influenced the result.
 
-# 27. Safety and privacy
+---
 
-QRs can contain private data, payment information, session links, tickets, or authentication material.
+# 30. Security and Privacy
 
-- Process locally where possible.
-- Do not execute recovered URLs or commands.
-- Do not publish real private QR images in tests or benchmarks.
-- Redact live credentials and personal identifiers.
-- Never claim authorization that the user did not provide.
+QR recovery can expose:
 
-This Skill is a reconstruction/validation method, not an authentication bypass.
+- tickets;
+- payment addresses;
+- login/session links;
+- activation tokens;
+- contact data;
+- private URLs;
+- credentials.
 
-# 28. Implementation notes
+Process locally where practical. Do not automatically visit recovered URLs. Do not publish real sensitive payloads in examples, tests, or benchmarks.
 
-The Python package in `src/damaged_qr_recovery/` provides small, dependency-light primitives. It is intentionally not a giant monolithic decoder hidden behind one function.
+Use only images/documents you are authorized to inspect.
 
-The repository's algorithm references are the authoritative companion material:
+---
 
-- `references/qr-structure.md`
-- `references/block-layout.md`
-- `references/reed-solomon.md`
-- `references/recovery-strategies.md`
-- `references/validation.md`
+# 31. Final Rule
 
-Use them when implementing a stage rather than silently substituting a heuristic.
+**The QR matrix is the source of truth.**
 
-# 29. Final rule
-
-**A recovered payload is not confirmed because it is plausible. It is confirmed because the QR's structure, redundancy, regenerated matrix, and independent validation all agree — and no competing candidate survives.**
+Semantic plausibility helps search. External metadata helps constrain. Reed-Solomon helps recover. Re-encoding helps reproduce. Independent decoding helps sanity-check. But confirmation comes from the intersection of these independent constraints, not from any single one.
